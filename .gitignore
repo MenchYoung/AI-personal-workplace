@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Node
+node_modules/
+.npm-cache/
+dist/
+
+# Local app state
+storage/*.db
+storage/*.db-*
+storage/projects/
+
+# OS/editor
+.DS_Store
+Thumbs.db
