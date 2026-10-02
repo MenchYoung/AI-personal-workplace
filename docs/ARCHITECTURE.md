@@ -1,6 +1,6 @@
 # Architecture
 
-## Phase 0 Shape
+## Current Shape
 
 ```text
 Browser
@@ -13,19 +13,291 @@ React Frontend
   v
 FastAPI Backend
   |
-  | sqlite3
+  | sqlite3 + local file writes
   v
-storage/workspace.db
+storage/
+  |
+  |-- workspace.db
+  |-- projects/{project_id}/materials/
 ```
+
+The application is a local-first personal research workspace. The frontend owns the interactive workspace UI, the backend owns persistence and file storage, and SQLite is the source of truth for project metadata, documents, materials, and folders.
 
 ## Directories
 
-- `frontend/`: browser UI.
-- `backend/`: API service and SQLite initialization.
-- `storage/`: local database and future uploaded files.
-- `docs/`: product requirements, architecture, and development plan.
+- `frontend/`: React + Vite browser UI.
+- `frontend/src/main.tsx`: current single-file React application.
+- `frontend/src/styles.css`: current UI styling.
+- `backend/`: FastAPI API service.
+- `backend/app/main.py`: API routes and request models.
+- `backend/app/database.py`: SQLite path and schema initialization.
+- `backend/mcp_server.py`: local stdio MCP server that lets Codex read workspace context and create edit proposals.
+- `storage/`: local database and uploaded project materials.
+- `docs/`: product requirements, architecture notes, and development plan.
 
-## Current API
+## Frontend
 
-- `GET /health`: confirms the backend is running.
-- `GET /api/projects`: returns the current project list.
+The frontend currently provides:
+
+- A Projects page for creating and opening project workspaces.
+- A project workspace with the sections `Goals`, `Plans`, `Tasks`, `Knowledge`, `Documents`, and `Reviews`.
+- A resizable left file tree.
+- Folder creation and deletion inside each section.
+- Markdown document creation, editing, saving, and deletion.
+- Free text selection inside the document editor, with an `Ask` action for turning the selected text into a saved selection.
+- A right-side selections drawer that shows saved selections, their selected text, instructions, context, and edit proposals.
+- Proposal review controls for accepting or rejecting suggested edits.
+- Material upload, download, deletion, and storage cleanup.
+- Project search across document title/content and material filename.
+
+Only `Documents` and `Knowledge` have full panels today. `Goals`, `Plans`, `Tasks`, and `Reviews` are reserved sections with placeholder views.
+
+## Backend
+
+The backend is a FastAPI service with permissive local CORS for the Vite dev server:
+
+- `http://localhost:5173`
+- `http://127.0.0.1:5173`
+
+It initializes SQLite during application startup and stores uploaded material files under `storage/projects/{project_id}/materials/`.
+
+## Data Model
+
+### `projects`
+
+Represents a top-level workspace, such as an application, research line, or writing project.
+
+Fields:
+
+- `id`
+- `name`
+- `description`
+- `created_at`
+- `updated_at`
+
+Project names are unique. When creating a project with an existing name, the backend assigns an available suffix such as `Project (2)`.
+
+### `documents`
+
+Stores Markdown documents inside a project.
+
+Fields:
+
+- `id`
+- `project_id`
+- `title`
+- `content`
+- `created_at`
+- `updated_at`
+
+Documents are currently stored as whole Markdown strings. User selections are represented with character offsets into this full content.
+
+### `materials`
+
+Stores metadata for uploaded project materials.
+
+Fields:
+
+- `id`
+- `project_id`
+- `original_filename`
+- `stored_path`
+- `content_type`
+- `size_bytes`
+- `uploaded_at`
+
+The uploaded file itself is stored on disk. The database stores the path relative to `storage/`.
+
+### `folders`
+
+Stores the left-sidebar tree organization.
+
+Fields:
+
+- `id`
+- `project_id`
+- `section`
+- `parent_folder_id`
+- `name`
+- `created_at`
+
+Folders can be nested. They currently organize the UI tree, but documents and materials are not yet assigned to folders.
+
+### `document_selections`
+
+Stores one user-created selection inside a document.
+
+Fields:
+
+- `id`
+- `document_id`
+- `start_offset`
+- `end_offset`
+- `selected_text`
+- `before_context`
+- `after_context`
+- `document_updated_at`
+- `instruction`
+- `created_at`
+- `updated_at`
+
+The selection keeps both offsets and a text snapshot. Offsets tell the system where the selected text came from. The text snapshot and context help Codex understand what the user meant even after reopening the page.
+
+### `edit_proposals`
+
+Stores proposed edits for a saved selection.
+
+Fields:
+
+- `id`
+- `selection_id`
+- `document_id`
+- `replacement_start_offset`
+- `replacement_end_offset`
+- `original_text`
+- `proposed_text`
+- `rationale`
+- `scope_type`
+- `status`
+- `created_at`
+- `updated_at`
+
+`scope_type` is `selection_only` when the proposed edit changes only the selected text. It is `expanded` when Codex believes nearby text should be changed together for fluency. Proposals do not change the document until the user accepts them.
+
+## Current API Surface
+
+### Health
+
+- `GET /health`
+
+### Projects
+
+- `GET /api/projects`
+- `POST /api/projects`
+- `GET /api/projects/{project_id}`
+- `PATCH /api/projects/{project_id}`
+- `DELETE /api/projects/{project_id}`
+
+### Documents
+
+- `GET /api/projects/{project_id}/documents`
+- `POST /api/projects/{project_id}/documents`
+- `GET /api/documents/{document_id}`
+- `PATCH /api/documents/{document_id}`
+- `DELETE /api/documents/{document_id}`
+
+### Selections
+
+- `GET /api/documents/{document_id}/selections`
+- `POST /api/documents/{document_id}/selections`
+- `GET /api/selections/{selection_id}`
+- `PATCH /api/selections/{selection_id}`
+
+### Edit Proposals
+
+- `GET /api/selections/{selection_id}/proposals`
+- `POST /api/selections/{selection_id}/proposals`
+- `GET /api/proposals/{proposal_id}`
+- `POST /api/proposals/{proposal_id}/accept`
+- `POST /api/proposals/{proposal_id}/reject`
+
+### Materials
+
+- `GET /api/projects/{project_id}/materials`
+- `POST /api/projects/{project_id}/materials`
+- `GET /api/materials/{material_id}/download`
+- `DELETE /api/materials/{material_id}`
+
+### Folders
+
+- `GET /api/projects/{project_id}/folders`
+- `POST /api/projects/{project_id}/folders`
+- `DELETE /api/folders/{folder_id}`
+
+### Search And Cleanup
+
+- `GET /api/projects/{project_id}/search?q=...`
+- `POST /api/cleanup-storage`
+- `POST /api/projects/{project_id}/cleanup-storage`
+
+## Storage Flow
+
+When a material is uploaded:
+
+1. The frontend sends the file as multipart form data.
+2. The backend creates a `materials` row.
+3. The backend writes the file to `storage/projects/{project_id}/materials/{material_id}_{filename}`.
+4. The backend updates the `stored_path` field with the path relative to `storage/`.
+
+When a material is deleted:
+
+1. The backend removes the stored file if it exists.
+2. The backend deletes the `materials` row.
+3. The project `updated_at` timestamp is refreshed.
+
+The cleanup endpoints remove orphan files that exist on disk but are no longer referenced by the database.
+
+## Codex Editing Boundary
+
+The project is intentionally project-first rather than file-first.
+
+The AI boundary is narrow and reviewable:
+
+- AI can read project context.
+- AI can search project materials and documents.
+- AI can read a saved selection and its surrounding context.
+- AI can create edit proposals.
+- AI should explain when a wider edit is needed and mark that proposal as `expanded`.
+- AI does not directly rewrite documents.
+- The user must accept a proposal before document text is changed.
+
+The current Codex bridge is `backend/mcp_server.py`. It exposes these tools:
+
+- `list_projects`
+- `list_documents`
+- `get_selection`
+- `search_project`
+- `create_edit_proposal`
+
+Codex is expected to read a `selection_id`, check the selected text in context, and create a proposal. The web UI remains the place where the user reviews and accepts or rejects the change.
+
+## Next Architecture Layer: App Connectors
+
+The next useful layer is an application connector/import layer between external sources and the existing project workspace.
+
+Recommended shape:
+
+```text
+External App
+  |
+  | import / sync
+  v
+Connector Layer
+  |
+  | normalized source item
+  v
+Project Workspace
+  |
+  | stored as material, document, plan, or review
+  v
+SQLite + storage/
+```
+
+This layer should avoid binding the core workspace to one provider. A Google Drive file, Notion page, GitHub Markdown file, or local folder item should first become a normalized source item, then be saved into the appropriate project section.
+
+Likely future tables:
+
+- `sources`: connected provider instances or import origins.
+- `source_items`: external items that have been imported or indexed.
+- `document_sections`: section-level representation of Markdown documents.
+- `document_versions`: accepted document or section versions.
+
+## Near-Term Risks
+
+- `frontend/src/main.tsx` is growing large and should eventually be split into components.
+- Folder structure exists, but documents/materials are not yet attached to folders.
+- Documents are whole Markdown blobs, so selection offsets can become stale if the document changes heavily before a proposal is accepted.
+- Search is simple SQLite `LIKE` search and does not parse uploaded file contents.
+- Edit proposal review exists, but there is not yet a side-by-side visual diff.
+- Accepted edits are not yet stored as a formal version history.
+- There is no authentication or multi-user model; this is currently a local-first single-user app.

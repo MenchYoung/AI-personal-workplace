@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
+  Archive,
   ArrowLeft,
   ChevronDown,
   ChevronRight,
@@ -14,6 +15,8 @@ import {
   RefreshCw,
   Save,
   Search,
+  PanelRightOpen,
+  RotateCcw,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -58,6 +61,37 @@ type FolderItem = {
   parent_folder_id: number | null;
   name: string;
   created_at: string;
+};
+
+type DocumentSelection = {
+  id: number;
+  ticket_code: string;
+  document_id: number;
+  start_offset: number;
+  end_offset: number;
+  selected_text: string;
+  before_context: string;
+  after_context: string;
+  document_updated_at: string;
+  instruction: string;
+  created_at: string;
+  archived_at: string | null;
+  proposal_status: "unprocessed" | "pending" | "accepted";
+};
+
+type EditProposal = {
+  id: number;
+  selection_id: number;
+  document_id: number;
+  replacement_start_offset: number;
+  replacement_end_offset: number;
+  original_text: string;
+  proposed_text: string;
+  rationale: string;
+  scope_type: "selection_only" | "expanded";
+  status: "pending" | "accepted" | "rejected";
+  created_at: string;
+  decided_at: string | null;
 };
 
 type SearchResults = {
@@ -911,11 +945,151 @@ function DocumentEditor({
   const [title, setTitle] = React.useState("");
   const [content, setContent] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  const [selectionRange, setSelectionRange] = React.useState<{ start: number; end: number } | null>(null);
+  const [askOpen, setAskOpen] = React.useState(false);
+  const [askInstruction, setAskInstruction] = React.useState("");
+  const [selectionSaving, setSelectionSaving] = React.useState(false);
+  const [selectionError, setSelectionError] = React.useState<string | null>(null);
+  const [createdSelection, setCreatedSelection] = React.useState<DocumentSelection | null>(null);
+  const [selectionToolbarPosition, setSelectionToolbarPosition] = React.useState<{ x: number; y: number } | null>(null);
+  const [selections, setSelections] = React.useState<DocumentSelection[]>([]);
+  const [selectionDrawerOpen, setSelectionDrawerOpen] = React.useState(false);
+  const [activeSelectionId, setActiveSelectionId] = React.useState<number | null>(null);
+  const [selectionListError, setSelectionListError] = React.useState<string | null>(null);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const editorBodyRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     setTitle(document?.title ?? "");
     setContent(document?.content ?? "");
+    setSelectionRange(null);
+    setAskOpen(false);
+    setAskInstruction("");
+    setSelectionError(null);
+    setCreatedSelection(null);
+    setSelectionToolbarPosition(null);
+    setSelections([]);
+    setSelectionDrawerOpen(false);
+    setActiveSelectionId(null);
+    setSelectionListError(null);
   }, [document]);
+
+  const loadSelections = React.useCallback(async () => {
+    if (!document) return;
+
+    setSelectionListError(null);
+    try {
+      const data = await requestJson<{ selections: DocumentSelection[] }>(`/api/documents/${document.id}/selections`);
+      setSelections(data.selections);
+      setActiveSelectionId((current) => {
+        if (current && data.selections.some((selection) => selection.id === current)) return current;
+        return data.selections[0]?.id ?? null;
+      });
+    } catch (loadError) {
+      setSelectionListError(loadError instanceof Error ? loadError.message : "Unable to load selections.");
+    }
+  }, [document]);
+
+  React.useEffect(() => {
+    void loadSelections();
+  }, [loadSelections]);
+
+  const selectedText = selectionRange ? content.slice(selectionRange.start, selectionRange.end) : "";
+  const hasUnsavedContent = document ? title !== document.title || content !== document.content : false;
+
+  function captureSelection(event?: React.SyntheticEvent<HTMLTextAreaElement>) {
+    const textarea = textareaRef.current;
+    if (!textarea || !document) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const nextSelectedText = content.slice(start, end);
+
+    setSelectionError(null);
+    setCreatedSelection(null);
+
+    if (start === end || !nextSelectedText.trim()) {
+      setSelectionRange(null);
+      setAskOpen(false);
+      setSelectionToolbarPosition(null);
+      return;
+    }
+
+    setSelectionRange({ start, end });
+
+    if (event?.nativeEvent instanceof MouseEvent && editorBodyRef.current) {
+      const bodyRect = editorBodyRef.current.getBoundingClientRect();
+      const nextX = Math.min(Math.max(event.nativeEvent.clientX - bodyRect.left, 12), bodyRect.width - 88);
+      const nextY = Math.min(Math.max(event.nativeEvent.clientY - bodyRect.top - 52, 12), bodyRect.height - 52);
+      setSelectionToolbarPosition({ x: nextX, y: nextY });
+      return;
+    }
+
+    setSelectionToolbarPosition({ x: 14, y: 14 });
+  }
+
+  async function createSelection() {
+    if (!document || !selectionRange || !selectedText.trim() || !askInstruction.trim()) return;
+
+    setSelectionSaving(true);
+    setSelectionError(null);
+    setCreatedSelection(null);
+
+    try {
+      const data = await requestJson<{ selection: DocumentSelection }>(`/api/documents/${document.id}/selections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          start_offset: selectionRange.start,
+          end_offset: selectionRange.end,
+          selected_text: selectedText,
+          instruction: askInstruction.trim(),
+        }),
+      });
+      setCreatedSelection(data.selection);
+      setSelections((current) => [data.selection, ...current.filter((selection) => selection.id !== data.selection.id)]);
+      setActiveSelectionId(data.selection.id);
+      setSelectionDrawerOpen(true);
+      setAskOpen(false);
+      setAskInstruction("");
+    } catch (createError) {
+      setSelectionError(createError instanceof Error ? createError.message : "Unable to create Ask.");
+    } finally {
+      setSelectionSaving(false);
+    }
+  }
+
+  async function updateSelectionInstruction(selectionId: number, instruction: string) {
+    const data = await requestJson<{ selection: DocumentSelection }>(`/api/selections/${selectionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction }),
+    });
+    setSelections((current) => current.map((selection) => (selection.id === selectionId ? data.selection : selection)));
+    setCreatedSelection(data.selection);
+  }
+
+  async function setSelectionArchived(selectionId: number, archived: boolean) {
+    const action = archived ? "archive" : "unarchive";
+    const data = await requestJson<{ selection: DocumentSelection }>(`/api/selections/${selectionId}/${action}`, {
+      method: "POST",
+    });
+    setSelections((current) => current.map((selection) => (selection.id === selectionId ? data.selection : selection)));
+    setActiveSelectionId(data.selection.id);
+  }
+
+  async function deleteSelection(selectionId: number) {
+    await requestJson<{ status: string }>(`/api/selections/${selectionId}`, { method: "DELETE" });
+    setSelections((current) => {
+      const nextSelections = current.filter((selection) => selection.id !== selectionId);
+      setActiveSelectionId((currentActiveId) => {
+        if (currentActiveId !== selectionId) return currentActiveId;
+        return nextSelections[0]?.id ?? null;
+      });
+      return nextSelections;
+    });
+    setCreatedSelection((current) => (current?.id === selectionId ? null : current));
+  }
 
   if (!document) {
     return (
@@ -935,13 +1109,138 @@ function DocumentEditor({
         setSaving(true);
         try {
           await onSave(document.id, title, content);
+          setSelectionRange(null);
+          setAskOpen(false);
+          setCreatedSelection(null);
         } finally {
           setSaving(false);
         }
       }}
     >
       <input className="title-input" value={title} onChange={(event) => setTitle(event.target.value)} />
-      <textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="Write Markdown here." />
+      <div className="document-editor-body" ref={editorBodyRef}>
+        <textarea
+          ref={textareaRef}
+          value={content}
+          onBlur={captureSelection}
+          onChange={(event) => {
+            setContent(event.target.value);
+            setSelectionRange(null);
+            setAskOpen(false);
+            setCreatedSelection(null);
+            setSelectionToolbarPosition(null);
+          }}
+          onKeyUp={captureSelection}
+          onMouseUp={captureSelection}
+          onSelect={() => captureSelection()}
+          placeholder="Write here."
+        />
+        {selectedText && selectionToolbarPosition ? (
+          <div
+            className={askOpen ? "ask-floating-panel open" : "ask-floating-panel"}
+            style={{ left: selectionToolbarPosition.x, top: selectionToolbarPosition.y }}
+          >
+            {!askOpen ? (
+              <>
+                <button
+                  className="ask-floating-button"
+                  disabled={hasUnsavedContent}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => setAskOpen(true)}
+                  type="button"
+                >
+                  Ask
+                </button>
+                {hasUnsavedContent ? <span className="ask-floating-hint">Save first</span> : null}
+              </>
+            ) : (
+              <div className="ask-floating-form">
+                <div>
+                  <p className="ask-selection-label">Selected text</p>
+                  <p className="ask-selection-preview">{selectedText}</p>
+                  <p className="ask-selection-meta">
+                    Characters {selectionRange?.start} to {selectionRange?.end}
+                  </p>
+                </div>
+                {hasUnsavedContent ? (
+                  <span className="inline-error">Save the document before creating an Ask.</span>
+                ) : (
+                  <>
+                    <label>
+                      <span>What should Codex do?</span>
+                      <textarea
+                        autoFocus
+                        value={askInstruction}
+                        onChange={(event) => setAskInstruction(event.target.value)}
+                        placeholder="Make this more formal, or emphasize the medical AI angle."
+                      />
+                    </label>
+                    <div className="button-row end">
+                      <button
+                        className="secondary-button"
+                        onClick={() => {
+                          setAskOpen(false);
+                          setAskInstruction("");
+                          setSelectionError(null);
+                        }}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="primary-button"
+                        disabled={selectionSaving || !askInstruction.trim()}
+                        onClick={() => void createSelection()}
+                        type="button"
+                      >
+                        {selectionSaving ? "Creating" : "Create Ask"}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        ) : null}
+      </div>
+      {selectionError ? <div className="status-message error">{selectionError}</div> : null}
+      {createdSelection ? (
+        <div className="status-message success">
+          Selection #{createdSelection.ticket_code} created. Codex can use this ticket later.
+        </div>
+      ) : null}
+      <button
+        className="selection-drawer-toggle"
+        onClick={() => setSelectionDrawerOpen((current) => !current)}
+        title="Show selections"
+        type="button"
+      >
+        <PanelRightOpen size={16} />
+        Selections
+        <span>{selections.length}</span>
+      </button>
+      {selectionDrawerOpen ? (
+        <SelectionDrawer
+          activeSelectionId={activeSelectionId}
+          error={selectionListError}
+          onClose={() => setSelectionDrawerOpen(false)}
+          onDocumentUpdated={async (updatedDocument) => {
+            setTitle(updatedDocument.title);
+            setContent(updatedDocument.content);
+            await onSave(updatedDocument.id, updatedDocument.title, updatedDocument.content);
+            await loadSelections();
+            setSelectionRange(null);
+            setAskOpen(false);
+            setCreatedSelection(null);
+            setSelectionToolbarPosition(null);
+          }}
+          onSelect={setActiveSelectionId}
+          onSetArchived={setSelectionArchived}
+          onDeleteSelection={deleteSelection}
+          onUpdateInstruction={updateSelectionInstruction}
+          selections={selections}
+        />
+      ) : null}
       <div className="button-row end">
         <button
           className="danger-button"
@@ -961,6 +1260,414 @@ function DocumentEditor({
         </button>
       </div>
     </form>
+  );
+}
+
+function SelectionDrawer({
+  activeSelectionId,
+  error,
+  onClose,
+  onDeleteSelection,
+  onDocumentUpdated,
+  onSelect,
+  onSetArchived,
+  onUpdateInstruction,
+  selections,
+}: {
+  activeSelectionId: number | null;
+  error: string | null;
+  onClose: () => void;
+  onDeleteSelection: (selectionId: number) => Promise<void>;
+  onDocumentUpdated: (document: DocumentItem) => Promise<void>;
+  onSelect: (selectionId: number) => void;
+  onSetArchived: (selectionId: number, archived: boolean) => Promise<void>;
+  onUpdateInstruction: (selectionId: number, instruction: string) => Promise<void>;
+  selections: DocumentSelection[];
+}) {
+  const activeSelection = selections.find((selection) => selection.id === activeSelectionId) ?? selections[0] ?? null;
+  const [openGroups, setOpenGroups] = React.useState({ pending: true, accepted: true, archived: false });
+  const activeSelections = selections.filter((selection) => !selection.archived_at);
+  const pendingSelections = activeSelections.filter((selection) => selection.proposal_status !== "accepted");
+  const acceptedSelections = activeSelections.filter((selection) => selection.proposal_status === "accepted");
+  const archivedSelections = selections.filter((selection) => selection.archived_at);
+
+  function toggleGroup(group: "pending" | "accepted" | "archived") {
+    setOpenGroups((current) => ({ ...current, [group]: !current[group] }));
+  }
+
+  return (
+    <aside className="selection-drawer" aria-label="Document selections">
+      <div className="panel-title-row compact">
+        <div>
+          <h2>Selections</h2>
+          <p>{selections.length} saved for this document</p>
+        </div>
+        <button className="icon-button small" onClick={onClose} title="Close selections" type="button">
+          <ChevronRight size={16} />
+        </button>
+      </div>
+
+      {error ? <div className="status-message error">{error}</div> : null}
+      {selections.length === 0 ? <p className="muted">No selections yet. Select text and click Ask to create one.</p> : null}
+
+      {selections.length > 0 ? (
+        <div className="selection-drawer-layout">
+          <div className="selection-list">
+            <SelectionGroup
+              activeSelectionId={activeSelection?.id ?? null}
+              count={pendingSelections.length}
+              isOpen={openGroups.pending}
+              label="未处理"
+              onSelect={onSelect}
+              onToggle={() => toggleGroup("pending")}
+              selections={pendingSelections}
+            />
+            <SelectionGroup
+              activeSelectionId={activeSelection?.id ?? null}
+              count={acceptedSelections.length}
+              isOpen={openGroups.accepted}
+              label="已处理"
+              onSelect={onSelect}
+              onToggle={() => toggleGroup("accepted")}
+              selections={acceptedSelections}
+            />
+            <SelectionGroup
+              activeSelectionId={activeSelection?.id ?? null}
+              count={archivedSelections.length}
+              isOpen={openGroups.archived}
+              label="归档"
+              onSelect={onSelect}
+              onToggle={() => toggleGroup("archived")}
+              selections={archivedSelections}
+            />
+          </div>
+          {activeSelection ? (
+            <SelectionDetail
+              onDeleteSelection={onDeleteSelection}
+              onDocumentUpdated={onDocumentUpdated}
+              onSetArchived={onSetArchived}
+              onUpdateInstruction={onUpdateInstruction}
+              selection={activeSelection}
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </aside>
+  );
+}
+
+function SelectionGroup({
+  activeSelectionId,
+  count,
+  isOpen,
+  label,
+  onSelect,
+  onToggle,
+  selections,
+}: {
+  activeSelectionId: number | null;
+  count: number;
+  isOpen: boolean;
+  label: string;
+  onSelect: (selectionId: number) => void;
+  onToggle: () => void;
+  selections: DocumentSelection[];
+}) {
+  return (
+    <section className="selection-group">
+      <button className="selection-group-header" onClick={onToggle} type="button">
+        {isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+        <span>{label}</span>
+        <small>{count}</small>
+      </button>
+      {isOpen ? (
+        <div className="selection-group-items">
+          {selections.length === 0 ? <p className="selection-group-empty">暂无</p> : null}
+          {selections.map((selection) => (
+            <button
+              className={activeSelectionId === selection.id ? "selection-row active" : "selection-row"}
+              key={selection.id}
+              onClick={() => onSelect(selection.id)}
+              title={`Selection #${selection.ticket_code}`}
+              type="button"
+            >
+              #{selection.ticket_code}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SelectionDetail({
+  onDeleteSelection,
+  onDocumentUpdated,
+  onSetArchived,
+  onUpdateInstruction,
+  selection,
+}: {
+  onDeleteSelection: (selectionId: number) => Promise<void>;
+  onDocumentUpdated: (document: DocumentItem) => Promise<void>;
+  onSetArchived: (selectionId: number, archived: boolean) => Promise<void>;
+  onUpdateInstruction: (selectionId: number, instruction: string) => Promise<void>;
+  selection: DocumentSelection;
+}) {
+  const [instruction, setInstruction] = React.useState(selection.instruction);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [saved, setSaved] = React.useState(false);
+  const [proposals, setProposals] = React.useState<EditProposal[]>([]);
+  const [proposalText, setProposalText] = React.useState("");
+  const [proposalRationale, setProposalRationale] = React.useState("");
+  const [proposalScope, setProposalScope] = React.useState<"selection_only" | "expanded">("selection_only");
+  const [proposalSaving, setProposalSaving] = React.useState(false);
+  const [proposalError, setProposalError] = React.useState<string | null>(null);
+  const [actionSaving, setActionSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    setInstruction(selection.instruction);
+    setError(null);
+    setSaved(false);
+    setProposalText("");
+    setProposalRationale("");
+    setProposalScope("selection_only");
+    setProposalError(null);
+    setActionSaving(false);
+  }, [selection]);
+
+  React.useEffect(() => {
+    async function loadProposals() {
+      setProposalError(null);
+      try {
+        const data = await requestJson<{ proposals: EditProposal[] }>(`/api/selections/${selection.id}/proposals`);
+        setProposals(data.proposals);
+      } catch (loadError) {
+        setProposalError(loadError instanceof Error ? loadError.message : "Unable to load proposals.");
+      }
+    }
+
+    void loadProposals();
+  }, [selection]);
+
+  async function saveInstruction() {
+    if (!instruction.trim()) return;
+
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      await onUpdateInstruction(selection.id, instruction.trim());
+      setSaved(true);
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : "Unable to update selection.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function createProposal() {
+    if (!proposalText.trim()) return;
+
+    setProposalSaving(true);
+    setProposalError(null);
+    try {
+      const data = await requestJson<{ proposal: EditProposal }>(`/api/selections/${selection.id}/proposals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          proposed_text: proposalText,
+          rationale: proposalRationale,
+          scope_type: proposalScope,
+        }),
+      });
+      setProposals((current) => [data.proposal, ...current]);
+      setProposalText("");
+      setProposalRationale("");
+      setProposalScope("selection_only");
+    } catch (createError) {
+      setProposalError(createError instanceof Error ? createError.message : "Unable to create proposal.");
+    } finally {
+      setProposalSaving(false);
+    }
+  }
+
+  async function decideProposal(proposalId: number, decision: "accept" | "reject") {
+    setProposalError(null);
+    try {
+      const data = await requestJson<{ proposal: EditProposal; document?: DocumentItem }>(
+        `/api/proposals/${proposalId}/${decision}`,
+        { method: "POST" },
+      );
+      setProposals((current) => current.map((proposal) => (proposal.id === proposalId ? data.proposal : proposal)));
+      if (decision === "accept" && data.document) {
+        await onDocumentUpdated(data.document);
+      }
+    } catch (decisionError) {
+      setProposalError(decisionError instanceof Error ? decisionError.message : `Unable to ${decision} proposal.`);
+    }
+  }
+
+  async function toggleArchive() {
+    setActionSaving(true);
+    setError(null);
+    try {
+      await onSetArchived(selection.id, !selection.archived_at);
+    } catch (archiveError) {
+      setError(archiveError instanceof Error ? archiveError.message : "Unable to update archive status.");
+    } finally {
+      setActionSaving(false);
+    }
+  }
+
+  async function removeSelection() {
+    if (!window.confirm(`Delete ticket #${selection.ticket_code}? This releases the ticket number.`)) return;
+
+    setActionSaving(true);
+    setError(null);
+    try {
+      await onDeleteSelection(selection.id);
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete selection.");
+      setActionSaving(false);
+    }
+  }
+
+  return (
+    <article className="selection-detail">
+      <div className="selection-detail-header">
+        <div>
+          <h3>Selection #{selection.ticket_code}</h3>
+          <span>
+            ID {selection.id} · {selection.start_offset}-{selection.end_offset}
+          </span>
+        </div>
+        <div className="selection-detail-actions">
+          <button className="secondary-button compact" disabled={actionSaving} onClick={() => void toggleArchive()} type="button">
+            {selection.archived_at ? <RotateCcw size={14} /> : <Archive size={14} />}
+            {selection.archived_at ? "Unarchive" : "Archive"}
+          </button>
+          <button className="danger-button compact" disabled={actionSaving} onClick={() => void removeSelection()} type="button">
+            <Trash2 size={14} />
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <section>
+        <h4>Selected text</h4>
+        <p className="selection-text-block">{selection.selected_text}</p>
+      </section>
+
+      <section>
+        <h4>Instruction</h4>
+        <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} />
+        <div className="button-row end">
+          {saved ? <span className="status-inline">Saved</span> : null}
+          {error ? <span className="inline-error">{error}</span> : null}
+          <button
+            className="primary-button"
+            disabled={saving || !instruction.trim() || instruction.trim() === selection.instruction}
+            onClick={() => void saveInstruction()}
+            type="button"
+          >
+            {saving ? "Saving" : "Save"}
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h4>Context</h4>
+        <p className="selection-context-block">
+          {selection.before_context}
+          <mark>{selection.selected_text}</mark>
+          {selection.after_context}
+        </p>
+      </section>
+
+      <section>
+        <h4>Draft proposal</h4>
+        <div className="proposal-draft">
+          <label>
+            <span>Suggested replacement</span>
+            <textarea
+              value={proposalText}
+              onChange={(event) => setProposalText(event.target.value)}
+              placeholder="Write the improved version here. Codex will use this same proposal slot later."
+            />
+          </label>
+          <label>
+            <span>Reason</span>
+            <textarea
+              value={proposalRationale}
+              onChange={(event) => setProposalRationale(event.target.value)}
+              placeholder="Explain why this change is better, or why a wider edit is needed."
+            />
+          </label>
+          <label className="proposal-scope-row">
+            <span>Scope</span>
+            <select value={proposalScope} onChange={(event) => setProposalScope(event.target.value as "selection_only" | "expanded")}>
+              <option value="selection_only">Selected text only</option>
+              <option value="expanded">Needs wider edit</option>
+            </select>
+          </label>
+          <div className="button-row end">
+            {proposalError ? <span className="inline-error">{proposalError}</span> : null}
+            <button
+              className="primary-button"
+              disabled={proposalSaving || !proposalText.trim()}
+              onClick={() => void createProposal()}
+              type="button"
+            >
+              {proposalSaving ? "Creating" : "Create Proposal"}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h4>Proposals</h4>
+        {proposals.length === 0 ? <p className="muted">No proposals yet.</p> : null}
+        {proposals.map((proposal) => (
+          <article className="proposal-card" key={proposal.id}>
+            <div className="proposal-card-header">
+              <strong>Proposal #{proposal.id}</strong>
+              <span className={`proposal-status ${proposal.status}`}>{proposal.status}</span>
+            </div>
+            <div className="proposal-columns">
+              <div>
+                <h5>Original</h5>
+                <p>{proposal.original_text}</p>
+              </div>
+              <div>
+                <h5>Suggested</h5>
+                <p>{proposal.proposed_text}</p>
+              </div>
+            </div>
+            {proposal.rationale ? (
+              <div>
+                <h5>Reason</h5>
+                <p>{proposal.rationale}</p>
+              </div>
+            ) : null}
+            <p className="proposal-meta">
+              {proposal.scope_type === "expanded" ? "Wider edit requested" : "Selected text only"} · Characters{" "}
+              {proposal.replacement_start_offset}-{proposal.replacement_end_offset}
+            </p>
+            {proposal.status === "pending" ? (
+              <div className="button-row end">
+                <button className="secondary-button" onClick={() => void decideProposal(proposal.id, "reject")} type="button">
+                  Reject
+                </button>
+                <button className="primary-button" onClick={() => void decideProposal(proposal.id, "accept")} type="button">
+                  Accept
+                </button>
+              </div>
+            ) : null}
+          </article>
+        ))}
+      </section>
+    </article>
   );
 }
 

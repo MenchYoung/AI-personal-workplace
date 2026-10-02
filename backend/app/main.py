@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .database import STORAGE_DIR, get_connection, initialize_database
+from .database import STORAGE_DIR, generate_selection_ticket_code, get_connection, initialize_database
 
 
 class ProjectCreate(BaseModel):
@@ -30,6 +30,25 @@ class DocumentCreate(BaseModel):
 class DocumentUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=180)
     content: str | None = None
+
+
+class DocumentSelectionCreate(BaseModel):
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(ge=0)
+    selected_text: str = Field(min_length=1)
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class DocumentSelectionUpdate(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
+class EditProposalCreate(BaseModel):
+    proposed_text: str = Field(min_length=1)
+    rationale: str = ""
+    scope_type: str = Field(default="selection_only", pattern="^(selection_only|expanded)$")
+    replacement_start_offset: int | None = Field(default=None, ge=0)
+    replacement_end_offset: int | None = Field(default=None, ge=0)
 
 
 class FolderCreate(BaseModel):
@@ -125,6 +144,55 @@ def get_folder_or_404(folder_id: int) -> dict[str, Any]:
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
     return folder
+
+
+def get_selection_or_404(selection_id: int) -> dict[str, Any]:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, ticket_code, document_id, start_offset, end_offset, selected_text,
+                   before_context, after_context, document_updated_at, instruction, created_at, archived_at,
+                   CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM edit_proposals
+                           WHERE edit_proposals.selection_id = document_selections.id
+                             AND edit_proposals.status = 'accepted'
+                       ) THEN 'accepted'
+                       WHEN EXISTS (
+                           SELECT 1 FROM edit_proposals
+                           WHERE edit_proposals.selection_id = document_selections.id
+                             AND edit_proposals.status = 'pending'
+                       ) THEN 'pending'
+                       ELSE 'unprocessed'
+                   END AS proposal_status
+            FROM document_selections
+            WHERE id = ?
+            """,
+            (selection_id,),
+        ).fetchone()
+
+    selection = row_to_dict(row)
+    if selection is None:
+        raise HTTPException(status_code=404, detail="Selection not found")
+    return selection
+
+
+def get_proposal_or_404(proposal_id: int) -> dict[str, Any]:
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, selection_id, document_id, replacement_start_offset, replacement_end_offset,
+                   original_text, proposed_text, rationale, scope_type, status, created_at, decided_at
+            FROM edit_proposals
+            WHERE id = ?
+            """,
+            (proposal_id,),
+        ).fetchone()
+
+    proposal = row_to_dict(row)
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return proposal
 
 
 def safe_filename(filename: str) -> str:
@@ -422,6 +490,305 @@ def delete_document(document_id: int) -> dict[str, str]:
         connection.commit()
 
     return {"status": "deleted"}
+
+
+@app.get("/api/documents/{document_id}/selections")
+def list_document_selections(document_id: int) -> dict[str, list[dict[str, Any]]]:
+    get_document_or_404(document_id)
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, ticket_code, document_id, start_offset, end_offset, selected_text,
+                   before_context, after_context, document_updated_at, instruction, created_at, archived_at,
+                   CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM edit_proposals
+                           WHERE edit_proposals.selection_id = document_selections.id
+                             AND edit_proposals.status = 'accepted'
+                       ) THEN 'accepted'
+                       WHEN EXISTS (
+                           SELECT 1 FROM edit_proposals
+                           WHERE edit_proposals.selection_id = document_selections.id
+                             AND edit_proposals.status = 'pending'
+                       ) THEN 'pending'
+                       ELSE 'unprocessed'
+                   END AS proposal_status
+            FROM document_selections
+            WHERE document_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (document_id,),
+        ).fetchall()
+
+    return {"selections": [dict(row) for row in rows]}
+
+
+@app.post("/api/documents/{document_id}/selections", status_code=201)
+def create_document_selection(document_id: int, payload: DocumentSelectionCreate) -> dict[str, Any]:
+    document = get_document_or_404(document_id)
+    content = document["content"]
+    start_offset = payload.start_offset
+    end_offset = payload.end_offset
+    selected_text = payload.selected_text
+    instruction = payload.instruction.strip()
+
+    if not selected_text.strip():
+        raise HTTPException(status_code=422, detail="Selected text is required")
+    if not instruction:
+        raise HTTPException(status_code=422, detail="Instruction is required")
+    if end_offset <= start_offset:
+        raise HTTPException(status_code=422, detail="Selection end must be after start")
+    if end_offset > len(content):
+        raise HTTPException(status_code=400, detail="Selection is outside document content")
+    if content[start_offset:end_offset] != selected_text:
+        raise HTTPException(status_code=409, detail="Selected text no longer matches document content")
+
+    before_context = content[max(0, start_offset - 500) : start_offset]
+    after_context = content[end_offset : min(len(content), end_offset + 500)]
+
+    with get_connection() as connection:
+        ticket_code = generate_selection_ticket_code(connection)
+        cursor = connection.execute(
+            """
+            INSERT INTO document_selections (
+                ticket_code, document_id, start_offset, end_offset, selected_text,
+                before_context, after_context, document_updated_at, instruction
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ticket_code,
+                document_id,
+                start_offset,
+                end_offset,
+                selected_text,
+                before_context,
+                after_context,
+                document["updated_at"],
+                instruction,
+            ),
+        )
+        connection.commit()
+        selection_id = cursor.lastrowid
+
+    return {"selection": get_selection_or_404(selection_id)}
+
+
+@app.get("/api/selections/{selection_id}")
+def get_selection(selection_id: int) -> dict[str, Any]:
+    return {"selection": get_selection_or_404(selection_id)}
+
+
+@app.patch("/api/selections/{selection_id}")
+def update_selection(selection_id: int, payload: DocumentSelectionUpdate) -> dict[str, Any]:
+    get_selection_or_404(selection_id)
+    instruction = payload.instruction.strip()
+
+    if not instruction:
+        raise HTTPException(status_code=422, detail="Instruction is required")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE document_selections
+            SET instruction = ?
+            WHERE id = ?
+            """,
+            (instruction, selection_id),
+        )
+        connection.commit()
+
+    return {"selection": get_selection_or_404(selection_id)}
+
+
+@app.post("/api/selections/{selection_id}/archive")
+def archive_selection(selection_id: int) -> dict[str, Any]:
+    get_selection_or_404(selection_id)
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE document_selections
+            SET archived_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (selection_id,),
+        )
+        connection.commit()
+
+    return {"selection": get_selection_or_404(selection_id)}
+
+
+@app.post("/api/selections/{selection_id}/unarchive")
+def unarchive_selection(selection_id: int) -> dict[str, Any]:
+    get_selection_or_404(selection_id)
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE document_selections
+            SET archived_at = NULL
+            WHERE id = ?
+            """,
+            (selection_id,),
+        )
+        connection.commit()
+
+    return {"selection": get_selection_or_404(selection_id)}
+
+
+@app.delete("/api/selections/{selection_id}")
+def delete_selection(selection_id: int) -> dict[str, str]:
+    get_selection_or_404(selection_id)
+
+    with get_connection() as connection:
+        connection.execute("DELETE FROM document_selections WHERE id = ?", (selection_id,))
+        connection.commit()
+
+    return {"status": "deleted"}
+
+
+@app.get("/api/selections/{selection_id}/proposals")
+def list_selection_proposals(selection_id: int) -> dict[str, list[dict[str, Any]]]:
+    get_selection_or_404(selection_id)
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, selection_id, document_id, replacement_start_offset, replacement_end_offset,
+                   original_text, proposed_text, rationale, scope_type, status, created_at, decided_at
+            FROM edit_proposals
+            WHERE selection_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (selection_id,),
+        ).fetchall()
+
+    return {"proposals": [dict(row) for row in rows]}
+
+
+@app.post("/api/selections/{selection_id}/proposals", status_code=201)
+def create_edit_proposal(selection_id: int, payload: EditProposalCreate) -> dict[str, Any]:
+    selection = get_selection_or_404(selection_id)
+    document = get_document_or_404(selection["document_id"])
+    content = document["content"]
+
+    replacement_start = (
+        payload.replacement_start_offset
+        if payload.replacement_start_offset is not None
+        else selection["start_offset"]
+    )
+    replacement_end = (
+        payload.replacement_end_offset
+        if payload.replacement_end_offset is not None
+        else selection["end_offset"]
+    )
+    proposed_text = payload.proposed_text
+    rationale = payload.rationale.strip()
+
+    if replacement_end <= replacement_start:
+        raise HTTPException(status_code=422, detail="Replacement end must be after start")
+    if replacement_end > len(content):
+        raise HTTPException(status_code=400, detail="Replacement range is outside document content")
+    if replacement_start > selection["start_offset"] or replacement_end < selection["end_offset"]:
+        raise HTTPException(status_code=422, detail="Replacement range must include the selected text")
+
+    original_text = content[replacement_start:replacement_end]
+    if selection["selected_text"] not in original_text:
+        raise HTTPException(status_code=409, detail="Selected text no longer appears in replacement range")
+
+    with get_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO edit_proposals (
+                selection_id, document_id, replacement_start_offset, replacement_end_offset,
+                original_text, proposed_text, rationale, scope_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                selection_id,
+                selection["document_id"],
+                replacement_start,
+                replacement_end,
+                original_text,
+                proposed_text,
+                rationale,
+                payload.scope_type,
+            ),
+        )
+        connection.commit()
+        proposal_id = cursor.lastrowid
+
+    return {"proposal": get_proposal_or_404(proposal_id)}
+
+
+@app.get("/api/proposals/{proposal_id}")
+def get_proposal(proposal_id: int) -> dict[str, Any]:
+    return {"proposal": get_proposal_or_404(proposal_id)}
+
+
+@app.post("/api/proposals/{proposal_id}/accept")
+def accept_proposal(proposal_id: int) -> dict[str, Any]:
+    proposal = get_proposal_or_404(proposal_id)
+    if proposal["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Proposal is not pending")
+
+    document = get_document_or_404(proposal["document_id"])
+    content = document["content"]
+    start = proposal["replacement_start_offset"]
+    end = proposal["replacement_end_offset"]
+
+    if end > len(content) or content[start:end] != proposal["original_text"]:
+        raise HTTPException(status_code=409, detail="Document changed since this proposal was created")
+
+    updated_content = f"{content[:start]}{proposal['proposed_text']}{content[end:]}"
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE documents
+            SET content = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (updated_content, proposal["document_id"]),
+        )
+        connection.execute(
+            "UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (document["project_id"],),
+        )
+        connection.execute(
+            """
+            UPDATE edit_proposals
+            SET status = 'accepted', decided_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (proposal_id,),
+        )
+        connection.commit()
+
+    return {"proposal": get_proposal_or_404(proposal_id), "document": get_document_or_404(proposal["document_id"])}
+
+
+@app.post("/api/proposals/{proposal_id}/reject")
+def reject_proposal(proposal_id: int) -> dict[str, Any]:
+    proposal = get_proposal_or_404(proposal_id)
+    if proposal["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Proposal is not pending")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE edit_proposals
+            SET status = 'rejected', decided_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (proposal_id,),
+        )
+        connection.commit()
+
+    return {"proposal": get_proposal_or_404(proposal_id)}
 
 
 @app.get("/api/projects/{project_id}/materials")
