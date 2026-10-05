@@ -51,6 +51,18 @@ class EditProposalCreate(BaseModel):
     replacement_end_offset: int | None = Field(default=None, ge=0)
 
 
+class ProjectReviewUpdate(BaseModel):
+    title: str = Field(default="Project Review", min_length=1, max_length=180)
+    content: str = ""
+    created_by: str = Field(default="codex", min_length=1, max_length=80)
+
+
+class ProjectMemoryUpdate(BaseModel):
+    content: str = Field(max_length=12000)
+    source_summary: str = ""
+    max_chars: int = Field(default=12000, ge=1000, le=12000)
+
+
 class FolderCreate(BaseModel):
     section: str = Field(min_length=1, max_length=60)
     name: str = Field(min_length=1, max_length=120)
@@ -323,6 +335,102 @@ def delete_project(project_id: int) -> dict[str, str]:
         connection.commit()
 
     return {"status": "deleted"}
+
+
+@app.get("/api/projects/{project_id}/review")
+def get_project_review(project_id: int) -> dict[str, Any]:
+    get_project_or_404(project_id)
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, project_id, title, content, created_by, created_at, updated_at
+            FROM project_reviews
+            WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+
+    return {"review": row_to_dict(row)}
+
+
+@app.put("/api/projects/{project_id}/review")
+def upsert_project_review(project_id: int, payload: ProjectReviewUpdate) -> dict[str, Any]:
+    get_project_or_404(project_id)
+    title = payload.title.strip()
+    created_by = payload.created_by.strip()
+
+    if not title:
+        raise HTTPException(status_code=422, detail="Review title is required")
+    if not created_by:
+        raise HTTPException(status_code=422, detail="Review author is required")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO project_reviews (project_id, title, content, created_by)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                title = excluded.title,
+                content = excluded.content,
+                created_by = excluded.created_by,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (project_id, title, payload.content, created_by),
+        )
+        connection.execute(
+            "UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (project_id,),
+        )
+        connection.commit()
+
+    return get_project_review(project_id)
+
+
+@app.get("/api/projects/{project_id}/memory")
+def get_project_memory(project_id: int) -> dict[str, Any]:
+    get_project_or_404(project_id)
+
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id, project_id, content, max_chars, source_summary, updated_at
+            FROM project_memory
+            WHERE project_id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+
+    return {"memory": row_to_dict(row)}
+
+
+@app.put("/api/projects/{project_id}/memory")
+def upsert_project_memory(project_id: int, payload: ProjectMemoryUpdate) -> dict[str, Any]:
+    get_project_or_404(project_id)
+
+    if len(payload.content) > payload.max_chars:
+        raise HTTPException(status_code=422, detail="Memory content exceeds max_chars")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO project_memory (project_id, content, max_chars, source_summary)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                content = excluded.content,
+                max_chars = excluded.max_chars,
+                source_summary = excluded.source_summary,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (project_id, payload.content, payload.max_chars, payload.source_summary),
+        )
+        connection.execute(
+            "UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (project_id,),
+        )
+        connection.commit()
+
+    return get_project_memory(project_id)
 
 
 @app.get("/api/projects/{project_id}/documents")

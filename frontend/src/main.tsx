@@ -99,6 +99,25 @@ type SearchResults = {
   materials: Material[];
 };
 
+type ProjectReview = {
+  id: number;
+  project_id: number;
+  title: string;
+  content: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type ProjectMemory = {
+  id: number;
+  project_id: number;
+  content: string;
+  max_chars: number;
+  source_summary: string;
+  updated_at: string;
+};
+
 async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, options);
 
@@ -368,6 +387,8 @@ function ProjectWorkspace({
   const [documents, setDocuments] = React.useState<DocumentItem[]>([]);
   const [materials, setMaterials] = React.useState<Material[]>([]);
   const [folders, setFolders] = React.useState<FolderItem[]>([]);
+  const [review, setReview] = React.useState<ProjectReview | null>(null);
+  const [memory, setMemory] = React.useState<ProjectMemory | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = React.useState<number | null>(null);
   const [message, setMessage] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -386,9 +407,15 @@ function ProjectWorkspace({
         requestJson<{ materials: Material[] }>(`/api/projects/${project.id}/materials`),
         requestJson<{ folders: FolderItem[] }>(`/api/projects/${project.id}/folders`),
       ]);
+      const [reviewData, memoryData] = await Promise.all([
+        requestJson<{ review: ProjectReview | null }>(`/api/projects/${project.id}/review`),
+        requestJson<{ memory: ProjectMemory | null }>(`/api/projects/${project.id}/memory`),
+      ]);
       setDocuments(documentData.documents);
       setMaterials(materialData.materials);
       setFolders(folderData.folders);
+      setReview(reviewData.review);
+      setMemory(memoryData.memory);
       setSelectedDocumentId((current) => {
         if (current && documentData.documents.some((document) => document.id === current)) return current;
         return documentData.documents[0]?.id ?? null;
@@ -486,6 +513,26 @@ function ProjectWorkspace({
         ? "Storage cache is already clean."
         : `Cleaned ${result.deleted_count} orphan file(s), ${formatBytes(result.deleted_bytes)} freed.`,
     );
+  }
+
+  async function saveProjectReview(title: string, content: string) {
+    const data = await requestJson<{ review: ProjectReview }>(`/api/projects/${project.id}/review`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, content, created_by: "manual" }),
+    });
+    setReview(data.review);
+    setMessage("Review saved.");
+  }
+
+  async function saveProjectMemory(content: string, sourceSummary: string, maxChars: number) {
+    const data = await requestJson<{ memory: ProjectMemory }>(`/api/projects/${project.id}/memory`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, source_summary: sourceSummary, max_chars: maxChars }),
+    });
+    setMemory(data.memory);
+    setMessage("Memory saved.");
   }
 
   async function createFolder(section: SectionName, name: string, parentFolderId: number | null = null) {
@@ -624,7 +671,18 @@ function ProjectWorkspace({
               onUpload={uploadMaterial}
             />
           ) : null}
-          {!["Documents", "Knowledge"].includes(activeSection) ? <PlaceholderPanel section={activeSection} /> : null}
+          {activeSection === "Reviews" ? (
+            <ReviewsPanel
+              documents={documents}
+              materials={materials}
+              memory={memory}
+              onSaveMemory={saveProjectMemory}
+              onSaveReview={saveProjectReview}
+              project={project}
+              review={review}
+            />
+          ) : null}
+          {!["Documents", "Knowledge", "Reviews"].includes(activeSection) ? <PlaceholderPanel section={activeSection} /> : null}
         </section>
       </div>
     </main>
@@ -1774,6 +1832,323 @@ function KnowledgePanel({
       )}
     </div>
   );
+}
+
+function ReviewsPanel({
+  documents,
+  materials,
+  memory,
+  onSaveMemory,
+  onSaveReview,
+  project,
+  review,
+}: {
+  documents: DocumentItem[];
+  materials: Material[];
+  memory: ProjectMemory | null;
+  onSaveMemory: (content: string, sourceSummary: string, maxChars: number) => Promise<void>;
+  onSaveReview: (title: string, content: string) => Promise<void>;
+  project: Project;
+  review: ProjectReview | null;
+}) {
+  const [promptVisible, setPromptVisible] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
+  const [editingReview, setEditingReview] = React.useState(false);
+  const [reviewTitle, setReviewTitle] = React.useState(review?.title ?? "Project Review");
+  const [reviewContent, setReviewContent] = React.useState(review?.content ?? "");
+  const [reviewSaving, setReviewSaving] = React.useState(false);
+  const [reviewError, setReviewError] = React.useState<string | null>(null);
+  const [editingMemory, setEditingMemory] = React.useState(false);
+  const [memoryContent, setMemoryContent] = React.useState(memory?.content ?? "");
+  const [memorySourceSummary, setMemorySourceSummary] = React.useState(memory?.source_summary ?? "");
+  const [memorySaving, setMemorySaving] = React.useState(false);
+  const [memoryError, setMemoryError] = React.useState<string | null>(null);
+  const memoryMaxChars = memory?.max_chars ?? 12000;
+  const memoryLength = editingMemory ? memoryContent.length : (memory?.content.length ?? 0);
+  const memoryOverLimit = memoryLength > memoryMaxChars;
+  const codexPrompt = buildReviewPrompt(project, documents, materials, memoryMaxChars);
+
+  React.useEffect(() => {
+    if (editingReview) return;
+    setReviewTitle(review?.title ?? "Project Review");
+    setReviewContent(review?.content ?? "");
+    setReviewError(null);
+  }, [editingReview, review]);
+
+  React.useEffect(() => {
+    if (editingMemory) return;
+    setMemoryContent(memory?.content ?? "");
+    setMemorySourceSummary(memory?.source_summary ?? "");
+    setMemoryError(null);
+  }, [editingMemory, memory]);
+
+  async function copyPrompt() {
+    await navigator.clipboard.writeText(codexPrompt);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  }
+
+  async function saveReviewEdit() {
+    const nextTitle = reviewTitle.trim();
+    if (!nextTitle) {
+      setReviewError("Review title is required.");
+      return;
+    }
+
+    setReviewSaving(true);
+    setReviewError(null);
+    try {
+      await onSaveReview(nextTitle, reviewContent);
+      setEditingReview(false);
+    } catch (saveError) {
+      setReviewError(saveError instanceof Error ? saveError.message : "Unable to save review.");
+    } finally {
+      setReviewSaving(false);
+    }
+  }
+
+  async function saveMemoryEdit() {
+    if (memoryOverLimit) {
+      setMemoryError(`Memory is ${memoryLength - memoryMaxChars} characters over the limit.`);
+      return;
+    }
+
+    setMemorySaving(true);
+    setMemoryError(null);
+    try {
+      await onSaveMemory(memoryContent, memorySourceSummary, memoryMaxChars);
+      setEditingMemory(false);
+    } catch (saveError) {
+      setMemoryError(saveError instanceof Error ? saveError.message : "Unable to save memory.");
+    } finally {
+      setMemorySaving(false);
+    }
+  }
+
+  return (
+    <div className="reviews-panel">
+      <div className="panel-title-row compact">
+        <div>
+          <h2>Reviews</h2>
+          <p>Project review and compressed memory written by Codex through MCP.</p>
+        </div>
+        <div className="button-row">
+          <button className="secondary-button" onClick={() => setPromptVisible((current) => !current)} type="button">
+            {promptVisible ? "Hide Prompt" : "Generate Codex Prompt"}
+          </button>
+          {promptVisible ? (
+            <button className="primary-button" onClick={() => void copyPrompt()} type="button">
+              {copied ? "Copied" : "Copy"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {promptVisible ? (
+        <section className="review-prompt-block">
+          <h3>Send this to Codex</h3>
+          <pre>{codexPrompt}</pre>
+        </section>
+      ) : null}
+
+      <section className="review-grid">
+        <article className="review-card">
+          <div className="review-card-header">
+            <div>
+              <h3>{editingReview ? "Edit Review" : review?.title ?? "Project Review"}</h3>
+              <p>{review ? `Updated ${formatDate(review.updated_at)} by ${review.created_by}` : "No review yet."}</p>
+            </div>
+            <div className="button-row">
+              {editingReview ? (
+                <>
+                  <button
+                    className="secondary-button compact"
+                    disabled={reviewSaving}
+                    onClick={() => {
+                      setEditingReview(false);
+                      setReviewTitle(review?.title ?? "Project Review");
+                      setReviewContent(review?.content ?? "");
+                      setReviewError(null);
+                    }}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primary-button compact"
+                    disabled={reviewSaving || !reviewTitle.trim()}
+                    onClick={() => void saveReviewEdit()}
+                    type="button"
+                  >
+                    {reviewSaving ? "Saving" : "Save"}
+                  </button>
+                </>
+              ) : (
+                <button className="secondary-button compact" onClick={() => setEditingReview(true)} type="button">
+                  <Pencil size={14} />
+                  Edit
+                </button>
+              )}
+            </div>
+          </div>
+          {editingReview ? (
+            <div className="review-edit-form">
+              <label>
+                <span>Title</span>
+                <input value={reviewTitle} onChange={(event) => setReviewTitle(event.target.value)} />
+              </label>
+              <label>
+                <span>Content</span>
+                <textarea value={reviewContent} onChange={(event) => setReviewContent(event.target.value)} />
+              </label>
+              {reviewError ? <span className="inline-error">{reviewError}</span> : null}
+            </div>
+          ) : review?.content ? (
+            <div className="review-content">{review.content}</div>
+          ) : (
+            <div className="empty-state compact-empty">
+              <FolderKanban size={30} />
+              <h3>No review yet</h3>
+              <p>Generate a Codex prompt, send it to Codex, then refresh this page after Codex writes back.</p>
+            </div>
+          )}
+        </article>
+
+        <article className="review-card">
+          <div className="review-card-header">
+            <div>
+              <h3>{editingMemory ? "Edit Memory" : "Memory"}</h3>
+              <p>
+                {memory ? `Updated ${formatDate(memory.updated_at)}` : "No memory yet."} · {memoryLength} / {memoryMaxChars}
+              </p>
+            </div>
+            <div className="button-row">
+              {editingMemory ? (
+                <>
+                  <button
+                    className="secondary-button compact"
+                    disabled={memorySaving}
+                    onClick={() => {
+                      setEditingMemory(false);
+                      setMemoryContent(memory?.content ?? "");
+                      setMemorySourceSummary(memory?.source_summary ?? "");
+                      setMemoryError(null);
+                    }}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primary-button compact"
+                    disabled={memorySaving || memoryOverLimit}
+                    onClick={() => void saveMemoryEdit()}
+                    type="button"
+                  >
+                    {memorySaving ? "Saving" : "Save"}
+                  </button>
+                </>
+              ) : (
+                <button className="secondary-button compact" onClick={() => setEditingMemory(true)} type="button">
+                  <Pencil size={14} />
+                  Edit
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="memory-meter" aria-label="Memory usage">
+            <span
+              className={memoryOverLimit ? "over-limit" : undefined}
+              style={{ width: `${Math.min(100, (memoryLength / memoryMaxChars) * 100)}%` }}
+            />
+          </div>
+          {editingMemory ? (
+            <div className="review-edit-form memory-edit-form">
+              <label>
+                <span>Source Summary</span>
+                <textarea
+                  className="source-summary-input"
+                  value={memorySourceSummary}
+                  onChange={(event) => setMemorySourceSummary(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Memory</span>
+                <textarea value={memoryContent} onChange={(event) => setMemoryContent(event.target.value)} />
+              </label>
+              {memoryOverLimit ? (
+                <span className="inline-error">Memory is {memoryLength - memoryMaxChars} characters over the limit.</span>
+              ) : null}
+              {memoryError ? <span className="inline-error">{memoryError}</span> : null}
+            </div>
+          ) : (
+            <>
+              {memory?.source_summary ? (
+                <section className="memory-source-summary">
+                  <h4>Source Summary</h4>
+                  <p>{memory.source_summary}</p>
+                </section>
+              ) : null}
+              {memory?.content ? (
+                <div className="review-content memory-content">{memory.content}</div>
+              ) : (
+                <p className="muted">Codex will compress project facts, progress, decisions, and next steps into this fixed memory.</p>
+              )}
+            </>
+          )}
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function buildReviewPrompt(project: Project, documents: DocumentItem[], materials: Material[], memoryMaxChars: number) {
+  const documentList = documents.map((document) => `- ${document.id}: ${document.title}`).join("\n") || "- No documents yet";
+  const materialList = materials.map((material) => `- ${material.id}: ${material.original_filename}`).join("\n") || "- No Knowledge materials yet";
+
+  return `请使用 personal_ai_workspace MCP 更新项目 Review 和固定长度 Memory。
+
+项目：#${project.id} ${project.name}
+Memory 上限：${memoryMaxChars} 字符
+
+请严格执行：
+1. 调用 get_project_context 读取项目上下文、当前 Review、当前 Memory、最近 selections/proposals、folders 和 materials。
+2. 查看 Documents 和 Knowledge：
+Documents:
+${documentList}
+
+Knowledge:
+${materialList}
+3. 不要只逐份总结材料。你要做的是“事实归并”和“当前状态判断”：
+   - 材料名称
+   - 文件夹/section 关系
+   - 年份、版本、时间顺序
+   - Documents 里的写作内容
+   - 当前 Review 和 Memory
+   综合判断同一件事在不同材料里的状态变化，并输出当前最可信、最新的结论。
+   如果旧材料说“MICCAI 再审/在投/待接收”，新材料说“MICCAI 已接收”，最终 Review 和 Memory 里应保留“MICCAI 已接收”，不要把旧状态和新状态并列成两个事实。
+   只有当旧状态对解释项目过程有必要时，才在 Review 里简短说明；Memory 里优先保留当前事实。
+4. 如果 Knowledge 材料会影响判断，请调用 list_materials 和 read_material 阅读相关材料。
+   - read_material 现在支持 PDF 文本抽取。
+   - 如果 read_material 返回了非空 text 且 warning 为 null，不要写“PDF 无法读取”或“服务不支持 PDF”。
+   - 只有当 read_material 明确返回 warning 或空 text 时，才说明材料需要人工/视觉复核。
+   - 如果 PDF 中的图表、截图、排版、证书图片或页面视觉信息会影响 Review，请调用 render_material_pages 渲染页面图片，并基于图片进行视觉检查。
+5. 生成项目总览 Review，必须包括：
+- Knowledge 部分有什么
+- Knowledge 里可以确认的当前事实是什么
+- 哪些旧信息已经被新材料覆盖
+- 哪些材料是历史参考，哪些材料是当前重点
+- 当前工作进度是什么
+- 最近添加了什么
+- 已完成什么
+- 还缺什么
+- 下一步建议
+6. 更新固定长度 Memory，不要简单追加；请重新压缩总结旧 Memory 和新上下文。
+7. Memory 必须保留项目目标、当前确认的关键事实、重要材料内容、当前进度、已做决策、未完成事项；被新材料覆盖的旧状态不要作为当前事实保存。
+8. Memory 必须控制在 ${memoryMaxChars} 字符以内。
+9. 调用 save_project_review 写回 Review。
+10. 调用 save_project_memory 写回 Memory。
+
+请不要让我手动粘贴项目内容，直接使用 MCP 工具读取和写回。`;
 }
 
 function SearchPanel({

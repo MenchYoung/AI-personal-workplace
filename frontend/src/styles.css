@@ -1057,6 +1057,136 @@ textarea {
   font-size: 0.84rem;
 }
 
+.reviews-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.review-prompt-block,
+.review-card {
+  padding: 14px;
+  border: 1px solid #ddd4c4;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.review-prompt-block {
+  display: grid;
+  gap: 10px;
+}
+
+.review-prompt-block h3,
+.review-card h3,
+.memory-source-summary h4 {
+  margin-bottom: 0;
+}
+
+.review-prompt-block pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #ddd4c4;
+  border-radius: 8px;
+  color: #17201b;
+  background: #fffaf1;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.review-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.review-card {
+  display: grid;
+  gap: 12px;
+}
+
+.review-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.review-card-header p,
+.memory-source-summary p {
+  margin-bottom: 0;
+  color: #6a756d;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
+.review-content {
+  max-height: 460px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #ddd4c4;
+  border-radius: 8px;
+  background: #fffaf1;
+  line-height: 1.58;
+  white-space: pre-wrap;
+}
+
+.review-edit-form {
+  display: grid;
+  gap: 10px;
+}
+
+.review-edit-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.review-edit-form label span {
+  color: #52675b;
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.review-edit-form textarea {
+  min-height: 300px;
+}
+
+.review-edit-form .source-summary-input {
+  min-height: 92px;
+}
+
+.memory-edit-form textarea:last-child {
+  min-height: 340px;
+}
+
+.memory-content {
+  max-height: 360px;
+}
+
+.memory-meter {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #efe7d9;
+}
+
+.memory-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #315c52;
+}
+
+.memory-meter span.over-limit {
+  background: #b44b3f;
+}
+
+.memory-source-summary {
+  display: grid;
+  gap: 6px;
+}
+
 .title-input {
   width: 100%;
   font-size: 1.1rem;

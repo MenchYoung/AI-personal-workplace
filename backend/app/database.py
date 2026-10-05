@@ -129,6 +129,33 @@ def initialize_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT 'Project Review',
+                content TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL DEFAULT 'codex',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL UNIQUE,
+                content TEXT NOT NULL DEFAULT '',
+                max_chars INTEGER NOT NULL DEFAULT 12000,
+                source_summary TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )
+            """
+        )
         folder_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(folders)").fetchall()
         }
